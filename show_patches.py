@@ -8,6 +8,7 @@ import os.path
 #import oyaml
 #import yaml
 #import yamloc
+from ruamel.yaml import YAML
 import subprocess
 import tempfile
 from datetime import datetime
@@ -16,6 +17,8 @@ CC = {
     7: 'Volume',
     91: 'Reverb'
 }
+
+yaml = YAML()
 
 logger = logging.getLogger(__name__)
 
@@ -27,15 +30,28 @@ def create_panel(parent, lines, cols, y, x, title=None):
         parent.addstr(y, x+3, f" {title} ")
     return win
 
-def set_message(control_messages, channel, message, value):
-    current = [ x for x in control_messages if x.cc == 7 ]
-    if current:
-        for message in current:
-            message.val = value
-    else:
-        message = patcher.yamlext.FlowMap(chan=channel, cc=message, val=value)
-        control_messages.append(message)
+def get_message(control_messages, channel, message):
+    prefix = f"{channel}/{message}="
+    for i, message in enumerate(control_messages):
+        if message.startswith(prefix):
+            return i, int(message[len(prefix):])
+    return -1, None
 
+def set_message(control_messages, channel, message, value):
+    value = min(127, value)
+    i, current = get_message(control_messages, channel, message)
+    value = f"{channel}/{message}={value}"
+    if i == -1:
+        control_messages.append(value)
+    else:
+        control_messages[i] = value
+    return control_messages
+
+def clear_message(control_messages, channel, message):
+    prefix = f"{channel}/{message}="
+    matches = [ x for x in control_messages if x.startswith(prefix) ]
+    for x in matches:
+        control_messages.remove(x)
     return control_messages
 
 class Patch(object):
@@ -65,10 +81,6 @@ class Patch(object):
 
     def get_channel(self, i):
         return self.channels.setdefault(i, {'presets': [], 'rules': [], 'cc': []})
-
-    def set_volume(self, i, value):
-        channel = self.channels[i]
-        set_message(channel['cc'], i, 7, value)
 
     def display(self, presets={}):
 
@@ -100,21 +112,24 @@ class Patch(object):
 
 class FPPerformer(object):
 
-    VERSION = 0.1
+    VERSION = 0.2
 
     def __init__(self, pxr):
         self.pxr = pxr
         self.patch = 0
+        self.channel = 1
+        self.expert = False
 
     def load_bank(self, bank_name=None):
         bank_name = bank_name or self.pxr.currentbank
         self.pxr.load_bank(bank_name)
 
         self.bank_file = os.path.join(self.pxr.bankdir, bank_name)
-        #with open(self.bank_file, 'r') as f:
-        #    self.editor = yamloc.YAML_Editor(f)
-        #with open(self.bank_file, 'r') as f:
-        #    self.data = yaml.load(f)
+        with open(self.bank_file, 'r') as f:
+            self.data = yaml.load(f)
+
+        _, self.volume = get_message(self.data.get('cc', []), 1, 7) or 100
+        self.channel = 1
 
     def main(self, stdscr):
         curses.halfdelay(5)
@@ -153,7 +168,7 @@ class FPPerformer(object):
                 lines-5, split, "Status")
 
         self.details = create_panel(self.stdscr, lines-8, right,
-                3, split, "Details")
+                3, split)
         self.details_pad = curses.newpad(1000, 200)
 
         curses.doupdate()
@@ -179,8 +194,9 @@ class FPPerformer(object):
         if warnings:
             self.set_status(" ".join(warnings), 0, curses.A_STANDOUT)
         else:
-            self.set_status("Loaded " + patches[p], 0)
+            self.set_status(f"Loaded {self.patch_name}")
 
+        # Update the patch list
         lines, cols = self.patchlist.getmaxyx()
 
         h = int(lines/2) - 1
@@ -220,37 +236,49 @@ class FPPerformer(object):
 
         self.details_pad.refresh(0, 0, top, left, top+lines-1, left+cols-1)
 
-    def save_patch(self):
-        with open('tmp.yaml', 'w') as f:
-            f.write(yaml.dump(self.pxr._bank))
-        self.select_patch(self.patch)
+    def change_volume(self, channel, change):
+        if channel == 0:
+            cc = self.data.setdefault('cc', [])
+        else:
+            cc = self.data['patches'][self.patch_name].setdefault('cc', [])
+
+        if change is None:
+            clear_message(cc, channel, 7)
+        else:    
+            _, current = get_message(cc, channel, 7)
+            if current is None:
+                current = self.volume
+            current += change
+            set_message(cc, channel, 7, current)
+            if channel == 0:
+                self.volume = current
+
+    def save_bank(self):
+        with open(self.bank_file, 'w') as f:
+            yaml.dump(self.data, f)
+        self.pxr.load_bank()
+        self.refresh()
 
     def edit_patch(self):
 
         editor = os.environ.get('EDITOR', 'vim')
+        name = self.patch_name
 
-        patch_name = self.pxr.patch_name(self.patch)
-        
-        #fragment = self.editor.get_fragment(f'0.0.0.patches.{patch_name}')
-        with tempfile.TemporaryDirectory(prefix="fp_") as d:
-            filename = os.path.join(d, f"{patch_name}.yaml")
+        with tempfile.TemporaryDirectory(prefix="fp_", ) as d:
+            filename = os.path.join(d, f"patch_{self.patch}.yaml")
             with open(filename, 'w') as f:
-                f.write(fragment.text)
-            subprocess.run(['vim', filename])
+                yaml.dump(self.data['patches'][name], f)
+            subprocess.run([editor, filename])
             with open(filename, 'r') as f:
-                text = f.read()
+                patch = yaml.load(f)
 
+            self.data['patches'][name] = patch
+            
         self.stdscr.keypad(True)
+        curses.curs_set(False)
 
-        self.editor.update_fragment(fragment, text)
-
-        # dump and re-read
-        try:
-            self.pxr.save_bank(raw=self.editor.raw)
-            self.set_status("Finished editing", 1)
-        except:
-            raise
-            self.set_status("Error saving", 1)
+        self.save_bank()
+        self.set_status("Finished editing")
 
     def handle_key(self, e):
         
@@ -272,46 +300,49 @@ class FPPerformer(object):
         if e == 'KEY_NPAGE':
             return self.select_patch(min(self.pxr.patches_count()-1, self.patch+5))
 
-        if e in ['=', '+']:
-            #vol = self.pxr.fluid_get('synth.gain')
-            #vol += 0.1
-            #self.pxr.fluid_set('synth.gain', vol)
-            self.current_patch.set_volume(1, 101)
-            self.save_patch()
-            return
-
-        if e in ['-', '_']:
-            vol = self.pxr.fluid_get('synth.gain')
-            vol -= 0.1
-            self.pxr.fluid_set('synth.gain', vol)
-            self.save_patch()
-            return
-
         if e == 'KEY_RESIZE':
             return self.refresh()
 
+
+        if e in ['=', '+']:
+            self.change_volume(self.channel, +10)
+            self.save_bank()
+            return
+
+        if e == '-':
+            self.change_volume(self.channel, -10)
+            self.save_bank()
+            return
+
+        if e == '_':
+            self.change_volume(self.channel, None)
+            self.save_bank()
+            return
+
+        if e in '0123456789':
+            if not self.expert: return
+            self.channel = int(e)
+            return
+        
         raise ValueError("Unknown key")
 
 
     def process_command(self, cmd):
         cmd = cmd.split()
 
-        if cmd[0] in (":edit", ":e"):
-            self.set_status("Entering edit mode")
-            self.edit_patch()
-            self.refresh()
-            return
-
-        if cmd[0] in (':set', ':s'):
-            if cmd[1] in ('volume', 'vol'):
-                self.current_patch.set_volume(int(cmd[2]), int(cmd[3]))
-                self.load_bank()
-                self.refresh()
-                return
 
         if cmd[0] in (":load", ":l"):
             self.load_bank(cmd[1])
             self.refresh()
+            return
+
+        if cmd[0] == ':expert':
+            self.expert = True
+            return
+
+        if cmd[0] == ':normal':
+            self.expert = False
+            self.channel = 1
             return
 
         if cmd[0] in (":reload", ":r"):
@@ -319,14 +350,19 @@ class FPPerformer(object):
             self.refresh()
             return
 
-        if cmd[0] in (":add", ":a"):
-            self.append_patch(cmd[1])
-            return
-
         if cmd[0] in (":quit", ":q"):
             self.stdscr.clear()
             self.stdscr.refresh()
             raise KeyboardInterrupt
+
+        if not self.expert:
+            raise RuntimeError("Enable expert mode...")
+
+        if cmd[0] in (":edit", ":e"):
+            self.set_status("Entering edit mode")
+            self.edit_patch()
+            self.refresh()
+            return
 
         raise RuntimeError("Unknown command")
 
@@ -338,7 +374,8 @@ class FPPerformer(object):
             _, cols = self.titlebar.getmaxyx()
             self.titlebar.addstr(0, cols-12, datetime.now().strftime(" %H:%M:%S "))
             gain = self.pxr.fluid_get('synth.gain')
-            self.set_status(f'Gain: {gain}', 1)
+            mode = 'E' if self.expert else 'N'
+            self.set_status(f'Gain: {gain}, Volume: {self.volume}, Channel: {self.channel} [{mode}]', 1)
             self.titlebar.refresh()
             
             try:
@@ -347,7 +384,7 @@ class FPPerformer(object):
                 continue
             
             try:
-                if buf and e == ' ': raise ValueError("Typing")
+                if buf[:1] == ':': raise ValueError("Typing")
                 self.handle_key(e)
                 continue
             except ValueError:
