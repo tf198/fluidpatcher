@@ -138,7 +138,7 @@ class FromToSpec(YAMLObject):
         self.to2 = to2
         
     def __repr__(self):
-        return '%s-%s=%s-%s' % (data.from1, data.from2, data.to1, data.to2)
+        return '%s-%s=%s-%s' % (self.from1, self.from2, self.to1, self.to2)
         
     @property
     def vals(self):
