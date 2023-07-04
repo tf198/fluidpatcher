@@ -8,7 +8,7 @@ import os.path
 #import oyaml
 #import yaml
 #import yamloc
-from ruamel.yaml import YAML
+#from ruamel.yaml import YAML
 import subprocess
 import tempfile
 from datetime import datetime
@@ -18,7 +18,7 @@ CC = {
     91: 'Reverb'
 }
 
-yaml = YAML()
+#yaml = YAML()
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +126,7 @@ class FPPerformer(object):
 
         self.bank_file = os.path.join(self.pxr.bankdir, bank_name)
         with open(self.bank_file, 'r') as f:
-            self.data = yaml.load(f)
+            self.data = patcher.read_yaml(f.read())
 
         _, self.volume = get_message(self.data.get('cc', []), 1, 7) or 100
         self.channel = 1
@@ -192,7 +192,7 @@ class FPPerformer(object):
         self.patch = p
         warnings = pxr.select_patch(p)
         if warnings:
-            self.set_status(" ".join(warnings), 0, curses.A_STANDOUT)
+            self.set_status(" ".join(warnings), 0, curses.A_BLINK)
         else:
             self.set_status(f"Loaded {self.patch_name}")
 
@@ -255,7 +255,7 @@ class FPPerformer(object):
 
     def save_bank(self):
         with open(self.bank_file, 'w') as f:
-            yaml.dump(self.data, f)
+            patcher.write_yaml(self.data, f)
         self.pxr.load_bank()
         self.refresh()
 
@@ -267,10 +267,10 @@ class FPPerformer(object):
         with tempfile.TemporaryDirectory(prefix="fp_", ) as d:
             filename = os.path.join(d, f"patch_{self.patch}.yaml")
             with open(filename, 'w') as f:
-                yaml.dump(self.data['patches'][name], f)
+                patcher.write_yaml(self.data['patches'][name], f)
             subprocess.run([editor, filename])
             with open(filename, 'r') as f:
-                patch = yaml.load(f)
+                patch = patcher.read_yaml(f.read())
 
             self.data['patches'][name] = patch
             
